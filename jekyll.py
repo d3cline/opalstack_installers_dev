@@ -13,11 +13,11 @@ import string
 import subprocess
 import shlex
 import random
+import datetime
 from urllib.parse import urlparse
 import urllib.request
-import datetime
 
-# Get API host from env variables. Strip protocol if set.
+# Get API host from env variables. Strip any protocol if present.
 API_HOST = os.environ.get('API_URL', 'https://my.opalstack.com').strip('https://').strip('http://')
 API_BASE_URI = '/api/v1'
 CMD_ENV = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'UMASK': '0002'}
@@ -28,7 +28,7 @@ class OpalstackAPITool():
         self.host = host
         self.base_uri = base_uri
 
-        # if no auth token provided, try logging in with credentials
+        # If no auth token provided, try logging in with credentials
         if not authtoken:
             endpoint = self.base_uri + '/login/'
             payload = json.dumps({
@@ -75,7 +75,7 @@ def run_command(cmd, env, cwd=None):
     return result
 
 def create_file(path, contents, writemode='w', perms=0o600):
-    """Create a file with specific contents and permissions."""
+    """Create a file with given contents and permissions."""
     with open(path, writemode) as f:
         f.write(contents)
     os.chmod(path, perms)
@@ -98,7 +98,6 @@ def add_cronjob(cronjob, env):
     homedir = os.path.expanduser('~')
     tmpname = f'{homedir}/.tmp{gen_password()}'
     with open(tmpname, 'w') as tmp:
-        # Get current crontab output if any
         try:
             current = run_command('crontab -l', env).decode()
         except Exception as ex:
@@ -111,18 +110,18 @@ def add_cronjob(cronjob, env):
 
 def main():
     """Main installation routine."""
-    # Set up argument parsing from CLI or environment variables.
+    # Grab arguments from command line or env variables.
     parser = argparse.ArgumentParser(
         description='Installs a Jekyll demo site on an Opalstack account')
-    parser.add_argument('-i', dest='app_uuid', help='UUID of the base app', 
+    parser.add_argument('-i', dest='app_uuid', help='UUID of the base app',
                         default=os.environ.get('UUID'))
-    parser.add_argument('-n', dest='app_name', help='Name of the base app', 
+    parser.add_argument('-n', dest='app_name', help='Name of the base app',
                         default=os.environ.get('APPNAME'))
-    parser.add_argument('-t', dest='opal_token', help='API auth token', 
+    parser.add_argument('-t', dest='opal_token', help='API auth token',
                         default=os.environ.get('OPAL_TOKEN'))
-    parser.add_argument('-u', dest='opal_user', help='Opalstack account name', 
+    parser.add_argument('-u', dest='opal_user', help='Opalstack account name',
                         default=os.environ.get('OPAL_USER'))
-    parser.add_argument('-p', dest='opal_password', help='Opalstack account password', 
+    parser.add_argument('-p', dest='opal_password', help='Opalstack account password',
                         default=os.environ.get('OPAL_PASS'))
     args = parser.parse_args()
 
@@ -130,42 +129,39 @@ def main():
                         format='[%(asctime)s] %(levelname)s: %(message)s')
     logging.info(f'Started installation of Jekyll demo site {args.app_name}')
 
-    # Initialize API tool
+    # Initialize API tool and get app info.
     api = OpalstackAPITool(API_HOST, API_BASE_URI, args.opal_token, args.opal_user, args.opal_password)
     appinfo = api.get(f'/app/read/{args.app_uuid}')
     osuser = appinfo["osuser_name"]
     appname = appinfo["name"]
-    # Define the app directory; adjust if needed.
     appdir = f'/home/{osuser}/apps/{appname}'
     if not os.path.exists(appdir):
         os.makedirs(appdir, exist_ok=True)
-    # Create a temporary directory under the app directory
     tmpdir = os.path.join(appdir, 'tmp')
     os.makedirs(tmpdir, exist_ok=True)
 
-    # Update CMD_ENV with settings for this app
+    # Update CMD_ENV with settings for this app.
     CMD_ENV.update({
         'TMPDIR': tmpdir,
         'GEM_HOME': tmpdir,
         'HOME': f'/home/{osuser}'
     })
-    # The PATH will be augmented later with the gem user's bin
 
     # ------------------------------
-    # Install Jekyll and Bundler
+    # Install Jekyll and Bundler Using SCL
     # ------------------------------
-    logging.info("Installing Jekyll and Bundler with --user-install")
-    # Run gem install command in appdir
-    run_command("gem install jekyll bundler --user-install", CMD_ENV, cwd=appdir)
+    logging.info("Installing Jekyll and Bundler with --user-install using SCL")
+    # Use SCL to enable ruby33 and nodejs20.
+    run_command("scl enable ruby33 nodejs20 -- gem install jekyll bundler --user-install", CMD_ENV, cwd=appdir)
 
-    # Determine the Ruby gem user directory
-    gem_user_dir = run_command("ruby -r rubygems -e 'puts Gem.user_dir'", CMD_ENV, cwd=appdir).decode().strip()
+    # Determine the Ruby gem user directory.
+    gem_user_dir = run_command("scl enable ruby33 nodejs20 -- ruby -r rubygems -e 'puts Gem.user_dir'", CMD_ENV, cwd=appdir).decode().strip()
     logging.info(f"Gem user directory: {gem_user_dir}")
-    # Update PATH to include the gem user bin directory
+    # Update PATH to include the gem user's bin directory.
     CMD_ENV['PATH'] = f"{gem_user_dir}/bin:" + CMD_ENV['PATH']
-    
-    # Confirm Jekyll installation
-    jekyll_version = run_command("jekyll -v", CMD_ENV, cwd=appdir).decode().strip()
+
+    # Confirm Jekyll installation.
+    jekyll_version = run_command("scl enable ruby33 nodejs20 -- jekyll -v", CMD_ENV, cwd=appdir).decode().strip()
     logging.info(f"Jekyll version: {jekyll_version}")
 
     # ------------------------------
@@ -173,15 +169,15 @@ def main():
     # ------------------------------
     site_dir = os.path.join(appdir, "demo-site")
     if not os.path.isdir(site_dir):
-        logging.info("Creating a new Jekyll site 'demo-site'...")
-        run_command("jekyll new demo-site", CMD_ENV, cwd=appdir)
+        logging.info("Creating a new Jekyll site 'demo-site' using SCL...")
+        run_command("scl enable ruby33 nodejs20 -- jekyll new demo-site", CMD_ENV, cwd=appdir)
     else:
         logging.info("Jekyll site 'demo-site' already exists. Skipping creation.")
-    
-    # Change directory to the site directory
+
+    # Change directory to the demo site.
     os.chdir(site_dir)
-    
-    # Create a sample post in the _posts directory
+
+    # Create a sample post in the _posts directory.
     posts_dir = os.path.join(site_dir, "_posts")
     if not os.path.isdir(posts_dir):
         os.makedirs(posts_dir)
@@ -203,28 +199,27 @@ def main():
         create_file(post_path, sample_post, perms=0o644)
     else:
         logging.info("Sample demo post already exists. Skipping.")
-    
-    # Build the site to verify installation
-    logging.info("Building the Jekyll site...")
-    run_command("bundle exec jekyll build", CMD_ENV, cwd=site_dir)
+
+    # Build the site to verify installation using SCL.
+    logging.info("Building the Jekyll site using SCL...")
+    run_command("scl enable ruby33 nodejs20 -- bundle exec jekyll build", CMD_ENV, cwd=site_dir)
 
     # ------------------------------
-    # Create Start and Stop Scripts
+    # Create Start and Stop Scripts (with SCL)
     # ------------------------------
-    # Create a start script to run jekyll serve in the background.
+    # Start script: runs 'jekyll serve' with SCL and writes the PID to a file.
     start_jekyll = textwrap.dedent(f"""\
         #!/bin/bash
         APPDIR={appdir}
         cd $APPDIR/demo-site
-        # Start Jekyll serve in the background and write the PID to a file.
-        nohup bundle exec jekyll serve > $APPDIR/demo-site/jekyll.log 2>&1 &
+        scl enable ruby33 nodejs20 -- bundle exec jekyll serve > $APPDIR/demo-site/jekyll.log 2>&1 &
         echo $! > $APPDIR/demo-site/jekyll.pid
         echo "Jekyll server started."
         """)
     start_script_path = os.path.join(appdir, "start_jekyll")
     create_file(start_script_path, start_jekyll, perms=0o700)
 
-    # Create a stop script to kill the jekyll serve process.
+    # Stop script: stops the jekyll serve process.
     stop_jekyll = textwrap.dedent(f"""\
         #!/bin/bash
         APPDIR={appdir}
@@ -243,8 +238,7 @@ def main():
     # ------------------------------
     # Optionally, Add a Cron Job to Ensure the Jekyll Server is Running
     # ------------------------------
-    m = random.randint(0,9)
-    # This cron job will run periodically (you can adjust the schedule as needed)
+    m = random.randint(0, 9)
     croncmd = f"0{m},1{m},2{m},3{m},4{m},5{m} * * * * {appdir}/start_jekyll > /dev/null 2>&1"
     add_cronjob(croncmd, CMD_ENV)
 
@@ -260,7 +254,7 @@ def main():
         
                {appdir}/start_jekyll
 
-           This will start the Jekyll server (running in the background).
+           This starts the Jekyll server using SCL (ruby33 and nodejs20).
 
         2. To stop the server, execute:
         
@@ -271,7 +265,7 @@ def main():
                {appdir}/demo-site/_site
 
         4. Edit your Jekyll site by modifying files in the demo-site directory.
-           To add more posts, add markdown files to the demo-site/_posts directory.
+           To add more posts, place markdown files in the demo-site/_posts directory.
 
         5. For further customization, refer to the [Jekyll documentation](https://jekyllrb.com/docs/).
 
@@ -281,7 +275,7 @@ def main():
     create_file(readme_path, readme, perms=0o644)
 
     # ------------------------------
-    # Notify Opalstack API That the App is Installed
+    # Notify the Opalstack API That the App is Installed
     # ------------------------------
     payload = json.dumps([{'id': args.app_uuid}])
     finished = api.post('/app/installed/', payload)
